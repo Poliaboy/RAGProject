@@ -9,3 +9,10 @@ langchain-community
 langchain-openai
 faiss-cpu
 pydantic
+textblob
+bertopic
+transformers
+torch
+spacy
+wordcloud
+scikit-learn

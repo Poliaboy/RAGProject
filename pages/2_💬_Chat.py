@@ -5,8 +5,16 @@ from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.chains import ConversationalRetrievalChain
 import pandas as pd
+import numpy as np
 import os
 import glob
+import sys
+import pickle
+
+# Add the root directory to Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.rag_utils import generate_all_summaries, prepare_rag_documents
+
 st.set_page_config(
     page_title="Chat Interface",
     page_icon="💬",
@@ -18,33 +26,53 @@ if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 if 'vector_store' not in st.session_state:
     st.session_state.vector_store = None
+if 'df' not in st.session_state:
+    st.session_state.df = None
+if 'summaries' not in st.session_state:
+    st.session_state.summaries = None
 
-st.title('💬 Chat Interface')
+st.title('💬 Enhanced Chat Interface')
 
 # Get OpenAI API key
 openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password")
 
 def load_and_process_data():
     """Load data and create vector store"""
-    data_path = 'TraductionAvisClients'
-    all_files = glob.glob(os.path.join(data_path, '*.xlsx'))
-    dfs = []
+    if st.session_state.df is None:
+        data_path = 'TraductionAvisClients'
+        all_files = glob.glob(os.path.join(data_path, '*.xlsx'))
+        dfs = []
+        
+        for file in all_files:
+            df = pd.read_excel(file)
+            dfs.append(df)
+        
+        st.session_state.df = pd.concat(dfs, ignore_index=True)
     
-    for file in all_files:
-        df = pd.read_excel(file)
-        dfs.append(df)
+    # Try to load pre-generated summaries
+    if st.session_state.summaries is None:
+        try:
+            with open('data/summaries.pkl', 'rb') as f:
+                st.session_state.summaries = pickle.load(f)
+        except FileNotFoundError:
+            # Generate new summaries
+            with st.spinner("Generating summaries for all companies and products..."):
+                st.session_state.summaries = generate_all_summaries(st.session_state.df, openai_api_key)
+                # Save summaries for future use
+                os.makedirs('data', exist_ok=True)
+                with open('data/summaries.pkl', 'wb') as f:
+                    pickle.dump(st.session_state.summaries, f)
     
-    combined_df = pd.concat(dfs, ignore_index=True)
-    
-    # Prepare documents for vectorization
-    documents = []
-    for _, row in combined_df.iterrows():
-        doc_text = f"Review for {row['assureur']} about {row['produit']} with rating {row['note']}: {row['avis']}"
-        documents.append(doc_text)
+    # Prepare documents including summaries
+    documents = prepare_rag_documents(
+        st.session_state.df,
+        st.session_state.summaries,
+        openai_api_key
+    )
     
     # Split documents
     text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    docs = text_splitter.create_documents(documents)
+    docs = text_splitter.split_documents(documents)
     
     return docs
 
@@ -71,9 +99,30 @@ def get_conversation_chain(vector_store):
         model_name='gpt-3.5-turbo'
     )
     
+    # Custom prompt to handle both summaries and reviews
+    prompt_template = """You are an AI assistant helping with insurance company reviews.
+    Use the following pieces of context to answer the question. The context includes both high-level summaries
+    and specific reviews. When answering:
+    1. Start with relevant high-level insights from summaries if available
+    2. Support your points with specific examples from reviews
+    3. Be balanced and objective in your assessment
+    
+    Context: {context}
+    
+    Chat History: {chat_history}
+    
+    Question: {question}
+    
+    Answer:"""
+    
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
-        retriever=vector_store.as_retriever(),
+        retriever=vector_store.as_retriever(
+            search_kwargs={
+                "k": 8,  # Increased to get more context
+                "filter": None  # Can be used to filter by metadata
+            }
+        ),
         return_source_documents=True,
         verbose=True
     )
@@ -85,10 +134,39 @@ if st.session_state.vector_store is None and openai_api_key:
     with st.spinner("Initializing the knowledge base..."):
         st.session_state.vector_store = initialize_vector_store()
 
-# Chat interface
+# Sidebar for exploring summaries
+st.sidebar.header("Pre-generated Insights")
+if st.session_state.summaries:
+    summary_type = st.sidebar.radio(
+        "View summaries by:",
+        ["Companies", "Products"]
+    )
+    
+    if summary_type == "Companies":
+        company = st.sidebar.selectbox(
+            "Select a company",
+            options=sorted(st.session_state.summaries['company_summaries'].keys())
+        )
+        if company:
+            st.sidebar.markdown(f"### Summary for {company}")
+            st.sidebar.write(st.session_state.summaries['company_summaries'][company])
+    else:
+        product = st.sidebar.selectbox(
+            "Select a product type",
+            options=sorted(st.session_state.summaries['product_summaries'].keys())
+        )
+        if product:
+            st.sidebar.markdown(f"### Summary for {product}")
+            st.sidebar.write(st.session_state.summaries['product_summaries'][product])
+
+# Main chat interface
 st.markdown("""
-This chat interface allows you to ask questions about customer reviews.
-The AI will analyze the reviews database to provide relevant answers.
+This enhanced chat interface allows you to:
+1. Ask questions about customer reviews
+2. Get company-specific insights
+3. Compare different insurance providers
+4. Analyze sentiment and trends
+5. Explore pre-generated summaries
 """)
 
 # Chat input
@@ -108,6 +186,17 @@ if user_question and openai_api_key and st.session_state.vector_store:
         # Add to chat history
         st.session_state.chat_history.append(("You", user_question))
         st.session_state.chat_history.append(("Assistant", response["answer"]))
+        
+        # Display source documents with metadata
+        with st.expander("View Sources"):
+            for i, doc in enumerate(response["source_documents"]):
+                st.markdown(f"**Source {i+1} ({doc.metadata.get('type', 'unknown')}):**")
+                st.write(doc.page_content)
+                if doc.metadata.get('type') == 'review':
+                    st.write(f"Company: {doc.metadata['company']}")
+                    st.write(f"Product: {doc.metadata['product']}")
+                    st.write(f"Rating: {doc.metadata['rating']}")
+                st.write("---")
         
     except Exception as e:
         st.error(f"Error processing question: {str(e)}")
