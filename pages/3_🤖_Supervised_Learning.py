@@ -73,6 +73,28 @@ class SentimentCNN(nn.Module):
         cat = self.dropout(torch.cat(pooled, dim=1))
         return self.fc(cat)
 
+# FastText-inspired model
+class FastTextClassifier(nn.Module):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, output_dim, dropout=0.3):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.fc1 = nn.Linear(embedding_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, text):
+        # text shape: [batch_size, seq_len]
+        embedded = self.embedding(text)  # [batch_size, seq_len, embedding_dim]
+        
+        # FastText-style averaging of word embeddings
+        pooled = torch.mean(embedded, dim=1)  # [batch_size, embedding_dim]
+        
+        # Feed through fully connected layers
+        hidden = self.dropout(F.relu(self.fc1(pooled)))
+        output = self.fc2(hidden)
+        
+        return output
+
 st.set_page_config(
     page_title="Supervised Learning",
     page_icon="🤖",
@@ -84,11 +106,11 @@ st.title('🤖 Supervised Learning Models')
 # Add explanation of what we're doing
 st.markdown("""
 ### What are we doing here?
-This section implements sentiment analysis on customer reviews using three different machine learning approaches:
+This section implements sentiment analysis on customer reviews using four different machine learning approaches:
 
 1. **TF-IDF + Logistic Regression**: A traditional machine learning approach that:
    - Converts text into numerical features using TF-IDF (Term Frequency-Inverse Document Frequency)
-   - Uses logistic regression to classify reviews into negative (1-2 stars), neutral (3 stars), or positive (4-5 stars)
+   - Uses logistic regression to classify reviews as negative (1-2 stars) or positive (4-5 stars)
    - Fast to train and interpretable, but doesn't capture word order or context
 
 2. **RNN (Recurrent Neural Network)**: A deep learning approach that:
@@ -100,6 +122,12 @@ This section implements sentiment analysis on customer reviews using three diffe
    - Also uses word embeddings
    - Applies convolution operations to detect local patterns and features in text
    - Good at capturing local patterns and key phrases
+
+4. **FastText-inspired Model**: A lightweight but effective approach that:
+   - Uses word embeddings like the other neural models
+   - Averages word embeddings to create document representations
+   - Fast to train and good at handling rare words
+   - Inspired by Facebook's FastText architecture
 
 ### Model Comparison
 Compare the performance of different models across:
@@ -219,10 +247,10 @@ with tab1:
                                 
                                 with col1:
                                     # Get class labels based on the model type
-                                    if model_name in ['RNN', 'CNN']:
-                                        class_labels = ['0', '1', '2']  # Numeric labels
+                                    if model_name in ['RNN', 'CNN', 'FastText']:
+                                        class_labels = ['0', '1']  # Binary numeric labels
                                     else:
-                                        class_labels = ['negative', 'neutral', 'positive']  # Text labels
+                                        class_labels = ['negative', 'positive']  # Binary text labels
                                     
                                     # Classification report
                                     if 'report_dict' in results:
@@ -231,7 +259,7 @@ with tab1:
                                             'Recall': [results['report_dict'][label]['recall'] for label in class_labels],
                                             'F1-Score': [results['report_dict'][label]['f1-score'] for label in class_labels],
                                             'Support': [results['report_dict'][label]['support'] for label in class_labels]
-                                        }, index=['Negative', 'Neutral', 'Positive'])
+                                        }, index=['Negative', 'Positive'])
                                         
                                         # Add averages
                                         report_df.loc['Macro Avg'] = [
@@ -258,8 +286,8 @@ with tab1:
                                     if 'confusion_matrix' in results:
                                         fig, ax = plt.subplots(figsize=(8, 6))
                                         sns.heatmap(results['confusion_matrix'], annot=True, fmt='d', cmap='Blues',
-                                                  xticklabels=['Negative', 'Neutral', 'Positive'],
-                                                  yticklabels=['Negative', 'Neutral', 'Positive'])
+                                                  xticklabels=['Negative', 'Positive'],
+                                                  yticklabels=['Negative', 'Positive'])
                                         plt.title(f'Confusion Matrix - {model_name}')
                                         plt.xlabel('Predicted')
                                         plt.ylabel('True')
@@ -291,7 +319,7 @@ with tab2:
     2. Enter your own text
     3. Get sentiment predictions
     
-    The model will classify the text as negative (1-2 stars), neutral (3 stars), or positive (4-5 stars).
+    The model will classify the text as negative (1-2 stars) or positive (4-5 stars).
     """)
     
     # Create a list of available models
@@ -341,7 +369,7 @@ with tab2:
                         prediction = model.predict(user_text_transformed)
                         probabilities = model.predict_proba(user_text_transformed)
                         
-                        # For TF-IDF model, prediction is already a string ('negative', 'neutral', 'positive')
+                        # For TF-IDF model, prediction is already a string ('negative', 'positive')
                         predicted_sentiment = prediction[0]
                         
                     except FileNotFoundError:
@@ -361,9 +389,9 @@ with tab2:
                         # Load the appropriate model
                         device = torch.device('mps' if torch.mps.is_available() else 'cpu')
                         if model_info['type'] == 'RNN':
-                            model = SentimentRNN(len(vocab), 100, 128, 3, 2, True, 0.3)
+                            model = SentimentRNN(len(vocab), 100, 128, 2, 2, True, 0.3)
                         else:  # CNN
-                            model = SentimentCNN(len(vocab), 100, 100, [3, 4, 5], 3, 0.3)
+                            model = SentimentCNN(len(vocab), 100, 100, [3, 4, 5], 2, 0.3)
                         
                         model.load_state_dict(torch.load(f"models/{model_info['type'].lower()}_{model_info['config_key']}.pt"))
                         model = model.to(device)
@@ -377,11 +405,43 @@ with tab2:
                             prediction = np.argmax(probabilities, axis=1)
                             
                             # For neural models, convert numeric prediction to sentiment
-                            sentiment_map = {0: "Negative", 1: "Neutral", 2: "Positive"}
+                            sentiment_map = {0: "Negative", 1: "Positive"}
                             predicted_sentiment = sentiment_map[prediction[0]]
                     
                     except FileNotFoundError:
                         st.error(f"Model files not found. Please retrain the {model_info['type']} model.")
+                        st.stop()
+                
+                elif model_info['type'] == 'FastText':
+                    try:
+                        # Load vocabulary
+                        with open(f"models/fasttext_vocab_{model_info['config_key']}.json", 'r') as f:
+                            vocab = json.load(f)
+                        
+                        # Create dataset from user text
+                        user_dataset = TextDataset([user_text], [0], vocab)  # Label doesn't matter for inference
+                        user_loader = DataLoader(user_dataset, batch_size=1)
+                        
+                        # Load the appropriate model
+                        device = torch.device('mps' if torch.mps.is_available() else 'cpu')
+                        model = FastTextClassifier(len(vocab), 100, 128, 2, 0.3)
+                        model.load_state_dict(torch.load(f"models/fasttext_{model_info['config_key']}.pt"))
+                        model = model.to(device)
+                        model.eval()
+                        
+                        # Make prediction
+                        with torch.no_grad():
+                            text_tensor = next(iter(user_loader))[0].to(device)
+                            outputs = model(text_tensor)
+                            probabilities = F.softmax(outputs, dim=1).cpu().numpy()
+                            prediction = np.argmax(probabilities, axis=1)
+                            
+                            # Convert numeric prediction to sentiment
+                            sentiment_map = {0: "Negative", 1: "Positive"}
+                            predicted_sentiment = sentiment_map[prediction[0]]
+                    
+                    except FileNotFoundError:
+                        st.error("FastText model files not found. Please retrain the model.")
                         st.stop()
                 
                 # Display results
@@ -390,10 +450,8 @@ with tab2:
                 # Display the prediction with appropriate color
                 sentiment_color = {
                     "Negative": "red",
-                    "Neutral": "orange",
                     "Positive": "green",
                     "negative": "red",
-                    "neutral": "orange",
                     "positive": "green"
                 }
                 
@@ -410,7 +468,7 @@ with tab2:
                 
                 # Handle probabilities based on model type
                 if model_info['type'] == 'TF-IDF':
-                    sentiments = ['Negative', 'Neutral', 'Positive']
+                    sentiments = ['Negative', 'Positive']
                     # Map probabilities to correct sentiment order based on model's classes
                     prob_dict = {label: prob for label, prob in zip(model.classes_, probabilities[0])}
                     ordered_probs = [prob_dict[label.lower()] for label in sentiments]
@@ -420,7 +478,7 @@ with tab2:
                     })
                 else:
                     probs_df = pd.DataFrame({
-                        'Sentiment': ['Negative', 'Neutral', 'Positive'],
+                        'Sentiment': ['Negative', 'Positive'],
                         'Probability': probabilities[0]
                     })
                 

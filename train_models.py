@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, f1_score
 import joblib
 import os
 import time
@@ -76,6 +76,28 @@ class SentimentCNN(nn.Module):
         cat = self.dropout(torch.cat(pooled, dim=1))
         return self.fc(cat)
 
+# FastText-inspired model
+class FastTextClassifier(nn.Module):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, output_dim, dropout=0.3):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.fc1 = nn.Linear(embedding_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, text):
+        # text shape: [batch_size, seq_len]
+        embedded = self.embedding(text)  # [batch_size, seq_len, embedding_dim]
+        
+        # FastText-style averaging of word embeddings
+        pooled = torch.mean(embedded, dim=1)  # [batch_size, embedding_dim]
+        
+        # Feed through fully connected layers
+        hidden = self.dropout(F.relu(self.fc1(pooled)))
+        output = self.fc2(hidden)
+        
+        return output
+
 def create_vocabulary(texts, min_freq=2):
     word_freq = {}
     for text in texts:
@@ -101,13 +123,14 @@ def train_tfidf_model(df, text_col, language, text_version):
     print(f"\nTraining TF-IDF model for {language} - {text_version}")
     start_time = time.time()
     
-    # Convert ratings to sentiment classes
+    # Convert ratings to binary sentiment classes (removing neutral)
     df['sentiment'] = pd.cut(df['note'], 
-                           bins=[-np.inf, 2.5, 3.5, np.inf], 
-                           labels=['negative', 'neutral', 'positive'])
+                           bins=[-np.inf, 2.5, np.inf], 
+                           labels=['negative', 'positive'])
     
-    # Remove rows with missing values
+    # Remove rows with missing values and filter out neutral ratings
     df_clean = df.dropna(subset=['note', text_col])
+    df_clean = df_clean[df_clean['note'] != 3]  # Remove neutral ratings
     
     # Split data
     X_train, X_test, y_train, y_test = train_test_split(
@@ -157,11 +180,27 @@ def train_neural_model(model_type, df, text_col, language, text_version, device)
     print(f"\nTraining {model_type} model for {language} - {text_version}")
     start_time = time.time()
     
-    # Prepare data
+    # Prepare data - binary classification
     df_clean = df.dropna(subset=['note', text_col])
+    df_clean = df_clean[df_clean['note'] != 3]  # Remove neutral ratings
     df_clean['sentiment'] = pd.cut(df_clean['note'], 
-                                 bins=[-np.inf, 2.5, 3.5, np.inf], 
-                                 labels=[0, 1, 2])
+                                 bins=[-np.inf, 2.5, np.inf], 
+                                 labels=[0, 1])  # Binary labels
+    
+    # Analyze class distribution
+    class_counts = df_clean['sentiment'].value_counts()
+    total_samples = len(df_clean)
+    print("\nClass Distribution:")
+    for label, count in class_counts.items():
+        percentage = count / total_samples * 100
+        print(f"Class {label}: {count} samples ({percentage:.1f}%)")
+    
+    # Calculate class weights for balanced training
+    class_weights = torch.FloatTensor([
+        total_samples / (len(class_counts) * count) 
+        for count in class_counts
+    ]).to(device)
+    print("\nClass weights:", class_weights.cpu().numpy())
     
     # Create vocabulary
     vocab = create_vocabulary(df_clean[text_col])
@@ -169,31 +208,59 @@ def train_neural_model(model_type, df, text_col, language, text_version, device)
     
     # Create datasets
     X_train, X_test, y_train, y_test = train_test_split(
-        df_clean[text_col], df_clean['sentiment'], test_size=0.2, random_state=42
+        df_clean[text_col], df_clean['sentiment'], 
+        test_size=0.2, random_state=42, stratify=df_clean['sentiment']  # Added stratification
     )
     
     train_dataset = TextDataset(X_train.values, y_train.values, vocab)
     test_dataset = TextDataset(X_test.values, y_test.values, vocab)
     
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    # Use weighted sampler for balanced batches
+    train_labels = y_train.values
+    class_sample_counts = np.bincount(train_labels)
+    weights = 1.0 / class_sample_counts
+    sample_weights = weights[train_labels]
+    sampler = torch.utils.data.WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(train_labels),
+        replacement=True
+    )
+    
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=32, 
+        sampler=sampler
+    )
     test_loader = DataLoader(test_dataset, batch_size=32)
     
     # Create model
     if model_type == 'RNN':
-        model = SentimentRNN(vocab_size, 100, 128, 3, 2, True, 0.3)
-    else:  # CNN
-        model = SentimentCNN(vocab_size, 100, 100, [3, 4, 5], 3, 0.3)
+        model = SentimentRNN(vocab_size, 100, 128, 2, 2, True, 0.3)
+    elif model_type == 'CNN':
+        model = SentimentCNN(vocab_size, 100, 100, [3, 4, 5], 2, 0.3)
+    else:  # FastText
+        model = FastTextClassifier(vocab_size, 100, 128, 2, 0.3)
     
     model = model.to(device)
     model.apply(init_weights)
     
     # Setup training
-    optimizer = torch.optim.Adam(model.parameters())
-    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=2, verbose=True
+    )
+    criterion = nn.CrossEntropyLoss(weight=class_weights)  # Added class weights
     
     # Training loop
-    n_epochs = 5
+    n_epochs = 15
     best_acc = 0
+    best_f1 = 0  # Added F1 tracking
+    patience = 5
+    no_improve = 0
+    best_model_state = None
+    
+    print("\nEpoch  Train Loss  Train Acc  Val Loss  Val Acc  Val F1  LR")
+    print("-" * 65)
     
     for epoch in range(n_epochs):
         # Training
@@ -240,34 +307,82 @@ def train_neural_model(model_type, df, text_col, language, text_version, device)
         val_loss = val_loss / len(test_loader)
         val_acc = val_acc / len(test_loader)
         
-        print(f'Epoch: {epoch+1}')
-        print(f'\tTrain Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}')
-        print(f'\tVal. Loss: {val_loss:.4f} | Val. Acc: {val_acc:.4f}')
+        # Calculate F1 score
+        val_f1 = f1_score(labels_list, predictions_list, average='weighted')
         
-        if val_acc > best_acc:
+        # Print metrics with current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"{epoch+1:3d}    {train_loss:.4f}    {train_acc:.4f}    {val_loss:.4f}    {val_acc:.4f}    {val_f1:.4f}    {current_lr:.6f}")
+        
+        # Learning rate scheduling based on F1 score
+        scheduler.step(val_f1)
+        
+        # Save best model based on F1 score
+        if val_f1 > best_f1:
+            best_f1 = val_f1
             best_acc = val_acc
-            # Save best model
-            torch.save(model.state_dict(), f'models/{model_type.lower()}_{language}_{text_version}.pt')
-            # Save vocabulary
-            with open(f'models/{model_type.lower()}_vocab_{language}_{text_version}.json', 'w') as f:
-                json.dump(vocab, f)
+            best_model_state = model.state_dict()
+            no_improve = 0
+        else:
+            no_improve += 1
+        
+        # Early stopping
+        if no_improve >= patience:
+            print(f"\nEarly stopping triggered after {epoch+1} epochs")
+            break
+    
+    # Load best model state
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    
+    # Save best model and vocabulary
+    torch.save(model.state_dict(), f'models/{model_type.lower()}_{language}_{text_version}.pt')
+    with open(f'models/{model_type.lower()}_vocab_{language}_{text_version}.json', 'w') as f:
+        json.dump(vocab, f)
     
     # Calculate final metrics
-    report_dict = classification_report(labels_list, predictions_list, output_dict=True)
-    cm = confusion_matrix(labels_list, predictions_list)
+    model.eval()
+    with torch.no_grad():
+        final_predictions = []
+        final_labels = []
+        for text, labels in test_loader:
+            text, labels = text.to(device), labels.to(device)
+            predictions = model(text)
+            final_predictions.extend(predictions.argmax(1).cpu().numpy())
+            final_labels.extend(labels.cpu().numpy())
+    
+    report_dict = classification_report(final_labels, final_predictions, output_dict=True)
+    cm = confusion_matrix(final_labels, final_predictions)
+    
+    # Print detailed metrics
+    print("\nDetailed Metrics:")
+    print(f"Accuracy by class:")
+    for i, label in enumerate(['Negative', 'Positive']):
+        print(f"{label}:")
+        print(f"  Precision: {report_dict[str(i)]['precision']:.4f}")
+        print(f"  Recall: {report_dict[str(i)]['recall']:.4f}")
+        print(f"  F1-score: {report_dict[str(i)]['f1-score']:.4f}")
+        print(f"  Support: {report_dict[str(i)]['support']}")
+    
+    print(f"\nConfusion Matrix:")
+    print(cm)
     
     # Save results
     results = {
         'accuracy': best_acc,
-        'weighted_f1': report_dict['weighted avg']['f1-score'],
+        'weighted_f1': best_f1,
         'training_time': time.time() - start_time,
         'report_dict': report_dict,
         'confusion_matrix': cm.tolist(),
         'language': language,
-        'text_version': text_version
+        'text_version': text_version,
+        'class_distribution': {
+            str(label): int(count) for label, count in class_counts.items()
+        }
     }
     
-    print(f"Best accuracy: {best_acc:.4f}")
+    print(f"\nBest accuracy: {best_acc:.4f}")
+    print(f"Best weighted F1: {best_f1:.4f}")
     print(f"Training time: {results['training_time']:.2f}s")
     return results
 
@@ -278,17 +393,13 @@ def main():
     
     # Define configurations
     languages = ["French", "English"]
-    text_versions = ["Cleaned", "No Stopwords", "Lemmatized", "No Stopwords + Lemmatized"]
+    text_versions = ["Cleaned", "No Stopwords + Lemmatized"]  # Only using two versions
     
     # Map text versions to column names
     text_col_map = {
         ("French", "Cleaned"): "avis_cleaned",
-        ("French", "No Stopwords"): "avis_no_stop",
-        ("French", "Lemmatized"): "avis_lemmatized",
         ("French", "No Stopwords + Lemmatized"): "avis_no_stop_and_lemmatized",
         ("English", "Cleaned"): "avis_en_cleaned",
-        ("English", "No Stopwords"): "avis_en_no_stop",
-        ("English", "Lemmatized"): "avis_en_lemmatized",
         ("English", "No Stopwords + Lemmatized"): "avis_en_no_stop_and_lemmatized"
     }
     
@@ -296,7 +407,8 @@ def main():
     all_results = {
         'TF-IDF': {},
         'RNN': {},
-        'CNN': {}
+        'CNN': {},
+        'FastText': {}  # Changed from BERT to FastText
     }
     
     # Set device
@@ -320,6 +432,10 @@ def main():
             # Train CNN
             results = train_neural_model('CNN', df, text_col, language, text_version, device)
             all_results['CNN'][config_key] = results
+            
+            # Train FastText
+            results = train_neural_model('FastText', df, text_col, language, text_version, device)
+            all_results['FastText'][config_key] = results
     
     # Save all results
     with open('models/training_results.json', 'w') as f:
