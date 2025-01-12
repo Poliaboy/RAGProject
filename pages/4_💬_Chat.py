@@ -44,7 +44,6 @@ def initialize_vector_store():
                     model_name="sentence-transformers/all-MiniLM-L6-v2",
                     model_kwargs={
                         'device': device,
-                        'cache_folder': None  # Disable caching to prevent memory issues
                     }
                 )
                 st.text("Embeddings model loaded successfully")
