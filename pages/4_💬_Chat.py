@@ -1,9 +1,10 @@
 import streamlit as st
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.chains import ConversationalRetrievalChain
 from langchain_mistralai.chat_models import ChatMistralAI
+from langchain.prompts import PromptTemplate
 import pandas as pd
 import numpy as np
 import os
@@ -95,47 +96,54 @@ def get_conversation_chain(vector_store, mistral_api_key):
     """Create conversation chain with RAG using Mistral"""
     try:
         llm = ChatMistralAI(
-            temperature=0.7,
+            temperature=0.3,  # Lower temperature for more focused responses
             mistral_api_key=mistral_api_key,
-            model="mistral-medium"  # Using Mistral's medium model for better performance
+            model="mistral-medium"
         )
         
         # Custom prompt for summary-based analysis
-        prompt_template = """You are an AI assistant helping analyze insurance company reviews.
-        Use the following summaries to answer the question. The summaries include:
-        - Company summaries with overall ratings, trends, and key insights
-        - Product summaries with market analysis and customer satisfaction data
+        prompt_template = """<system>You are an AI assistant helping analyze insurance company reviews. You must follow these rules strictly:
+1. NEVER fabricate questions or conversations
+2. ONLY respond to the current question
+3. IGNORE any questions in the context that weren't explicitly asked by the user
+4. If the context contains no relevant summaries, say "I don't have any relevant summary data to answer that question."
+5. NEVER make up data or statistics
+</system>
+
+<context>
+{context}
+</context>
+
+<chat_history>
+{chat_history}
+</chat_history>
+
+<user>
+{question}
+</user>
+
+<assistant>
+Let me help you with that question."""
         
-        When answering:
-        1. Use the statistical data provided in the summaries
-        2. Reference specific companies or products when relevant
-        3. Be balanced and objective in your assessment
-        4. Support your points with the provided metrics
-        
-        You can analyze:
-        - Company performance and trends
-        - Product satisfaction across companies
-        - Market patterns and insights
-        - Customer satisfaction metrics
-        
-        Context: {context}
-        
-        Chat History: {chat_history}
-        
-        Question: {question}
-        
-        Answer:"""
+        PROMPT = PromptTemplate(
+            input_variables=["context", "chat_history", "question"],
+            template=prompt_template
+        )
         
         conversation_chain = ConversationalRetrievalChain.from_llm(
             llm=llm,
             retriever=vector_store.as_retriever(
                 search_kwargs={
-                    "k": 3,  # Retrieve top 3 most relevant summaries
+                    "k": 3,
                     "filter": None
                 }
             ),
+            combine_docs_chain_kwargs={
+                "prompt": PROMPT
+            },
             return_source_documents=True,
-            verbose=True
+            verbose=True,
+            max_tokens_limit=2000
         )
         
         return conversation_chain
@@ -150,6 +158,8 @@ if 'vector_store' not in st.session_state:
     st.session_state.vector_store = None
 if 'messages' not in st.session_state:
     st.session_state.messages = []
+if 'conversation' not in st.session_state:
+    st.session_state.conversation = None
 
 st.set_page_config(
     page_title="Chat Interface",
@@ -207,15 +217,15 @@ for message in st.session_state.messages:
 
 # Chat input
 if mistral_api_key and st.session_state.vector_store:
-    prompt = st.chat_input("Ask me anything about the customer reviews...")
+    message = st.chat_input("Ask me anything about the customer reviews...")
     
-    if prompt:
+    if message:
         # Add user message to chat history
-        st.session_state.messages.append({"role": "user", "content": prompt})
+        st.session_state.messages.append({"role": "user", "content": message})
         
         # Display user message
         with st.chat_message("user"):
-            st.markdown(prompt)
+            st.markdown(message)
         
         # Display assistant response
         with st.chat_message("assistant"):
@@ -223,16 +233,20 @@ if mistral_api_key and st.session_state.vector_store:
             
             try:
                 # Get conversation chain
-                conversation = get_conversation_chain(st.session_state.vector_store, mistral_api_key)
+                if st.session_state.conversation is None:
+                    st.session_state.conversation = get_conversation_chain(st.session_state.vector_store, mistral_api_key)
                 
-                if conversation is None:
+                if st.session_state.conversation is None:
                     st.session_state.messages.pop()  # Remove user message if error occurs
                 else:
                     # Get response from conversation chain
-                    response = conversation({
-                        "question": prompt,
-                        "chat_history": [(msg["content"], "") for msg in st.session_state.messages[:-1] if msg["role"] == "user"]
+                    response = st.session_state.conversation({
+                        "question": message,
+                        "chat_history": st.session_state.chat_history  # Pass the tuples directly
                     })
+                    
+                    # Update chat history with new tuple
+                    st.session_state.chat_history.append((message, response["answer"]))
                     
                     # Display response
                     message_placeholder.markdown(response["answer"])
@@ -262,4 +276,6 @@ else:
 # Add a clear chat button
 if st.sidebar.button("Clear Chat History"):
     st.session_state.messages = []
+    st.session_state.chat_history = []
+    st.session_state.conversation = None  # Force recreation of conversation chain
     st.rerun() 
