@@ -20,3 +20,9 @@ source venv/bin/activate
 ```bash
 pip install -r requirements.txt
 ```
+
+4. Run the streamlit app:
+
+```bash
+streamlit run Home.py
+```
