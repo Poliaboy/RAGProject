@@ -89,6 +89,17 @@ with col3:
 with col4:
     st.metric("Average Rating", f"{df['note'].mean():.2f}/5")
 
+# Add rating distribution statistics
+st.header('Rating Distribution')
+rating_dist = df['note'].value_counts().sort_index()
+rating_percentages = (rating_dist / len(df) * 100).round(1)
+
+# Display rating distribution in columns
+cols = st.columns(5)
+for i, (rating, percentage) in enumerate(rating_percentages.items(), 1):
+    with cols[i-1]:
+        st.metric(f"{rating} Stars", f"{percentage}%", f"{rating_dist[rating]:,} reviews")
+
 # Show data sample
 st.header('Sample Data')
 st.dataframe(df.head())

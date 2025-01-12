@@ -197,6 +197,12 @@ This section provides comprehensive analysis of customer reviews data through mu
    - Product breakdowns
    - Review length comparisons
 
+5. **Product Analysis**:
+   - Rating distributions by product
+   - Review volume analysis
+   - Text characteristics by product
+   - Cross-product comparisons
+
 ### Why is this important?
 - **Data Quality**: Ensures our models work with clean, consistent data
 - **Text Insights**: Reveals patterns in customer feedback
@@ -209,11 +215,12 @@ with st.spinner('Loading and cleaning data...'):
     df = load_and_clean_data()
 
 # Create tabs for different analyses
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Data Quality",
     "Text Statistics",
     "N-gram Analysis",
-    "Company Analysis"
+    "Company Analysis",
+    "Product Analysis"
 ])
 
 with tab1:
@@ -461,6 +468,61 @@ with tab4:
             'Average Review Length (EN)': int(company_data['avis_en_length'].mean()),
             'Average Word Count (FR)': int(company_data['avis_word_count'].mean()),
             'Average Word Count (EN)': int(company_data['avis_en_word_count'].mean())
+        }
+        
+        stats_df = pd.DataFrame([stats])
+        st.dataframe(stats_df)
+
+with tab5:
+    st.header('Product Analysis')
+    st.markdown("""
+    Analyze product-specific patterns and trends:
+    - Rating distributions by product
+    - Review volume analysis
+    - Text characteristics by product
+    - Cross-product comparisons
+    """)
+    
+    # Product selection
+    selected_product = st.selectbox(
+        "Select Insurance Product",
+        options=sorted(df['produit'].unique())
+    )
+    
+    if selected_product:
+        product_data = df[df['produit'] == selected_product]
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Rating distribution for product
+            st.subheader('Rating Distribution')
+            fig5, ax5 = plt.subplots(figsize=(10, 6))
+            sns.histplot(data=product_data, x='note', bins=5)
+            plt.title(f'Rating Distribution for {selected_product}')
+            plt.xlabel('Rating')
+            plt.ylabel('Count')
+            st.pyplot(fig5)
+        
+        with col2:
+            # Company distribution for this product
+            st.subheader('Company Distribution')
+            company_counts = product_data['assureur'].value_counts()
+            fig6, ax6 = plt.subplots(figsize=(10, 6))
+            plt.pie(company_counts.values, labels=company_counts.index, autopct='%1.1f%%')
+            plt.title(f'Company Distribution for {selected_product}')
+            st.pyplot(fig6)
+        
+        # Show detailed statistics
+        st.subheader('Product Statistics')
+        stats = {
+            'Total Reviews': len(product_data),
+            'Average Rating': product_data['note'].mean(),
+            'Most Common Company': product_data['assureur'].mode()[0],
+            'Average Review Length (FR)': int(product_data['avis_length'].mean()),
+            'Average Review Length (EN)': int(product_data['avis_en_length'].mean()),
+            'Average Word Count (FR)': int(product_data['avis_word_count'].mean()),
+            'Average Word Count (EN)': int(product_data['avis_en_word_count'].mean())
         }
         
         stats_df = pd.DataFrame([stats])
