@@ -10,7 +10,7 @@ def generate_company_summary(reviews_df, company_name, openai_api_key):
     if len(company_reviews) == 0:
         return None
     
-    llm = ChatOpenAI(temperature=0.5, api_key=openai_api_key)
+    llm = ChatOpenAI(temperature=0.5, api_key=openai_api_key, model="gpt-4o-mini")
     
     prompt_template = """Write a comprehensive summary of the following insurance company reviews:
     {text}
