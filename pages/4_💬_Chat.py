@@ -24,35 +24,72 @@ def initialize_vector_store():
             ```
             python utils/generate_embeddings.py
             ```
-            This will create the vector store using local embeddings with MPS acceleration.
+            This will create the vector store using local embeddings.
             """)
             return None
+            
+        # Clear any existing caches
+        import gc
+        gc.collect()
         
-        # Initialize local embeddings model with MPS acceleration
-        import torch
-        if torch.backends.mps.is_available():
-            device = 'mps'
-            st.success("Using MPS (Metal Performance Shaders) acceleration")
-        else:
-            device = 'cpu'
-            st.info("MPS not available, falling back to CPU")
+        # Force CPU usage for more stable performance
+        device = 'cpu'
+        st.info("Using CPU for embeddings")
         
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': device}
-        )
-        
-        # Load the vector store
-        vector_store = FAISS.load_local(
-            cache_path,
-            embeddings,
-            allow_dangerous_deserialization=True  # Safe since we created the cache locally
-        )
-        st.success("Successfully loaded vector store with local embeddings!")
+        try:
+            # Initialize embeddings separately first
+            with st.spinner("Initializing embeddings model..."):
+                st.text("Loading sentence transformer model...")
+                embeddings = HuggingFaceEmbeddings(
+                    model_name="sentence-transformers/all-MiniLM-L6-v2",
+                    model_kwargs={
+                        'device': device,
+                        'cache_folder': None  # Disable caching to prevent memory issues
+                    }
+                )
+                st.text("Embeddings model loaded successfully")
+        except Exception as e:
+            st.error(f"Failed to load embeddings model: {str(e)}")
+            return None
+            
+        # Load the vector store with detailed progress
+        with st.spinner("Loading vector store..."):
+            st.text("Starting FAISS index load...")
+            import time
+            start_time = time.time()
+            
+            try:
+                vector_store = FAISS.load_local(
+                    cache_path,
+                    embeddings,
+                    allow_dangerous_deserialization=True
+                )
+                
+                load_time = time.time() - start_time
+                st.text(f"FAISS index loaded in {load_time:.2f} seconds")
+                
+                # Verify the vector store is working
+                st.text("Verifying vector store...")
+                test_query = "test"
+                vector_store.similarity_search(test_query, k=1)
+                st.text("Vector store verification successful")
+                
+            except Exception as e:
+                st.error(f"Failed to load FAISS index: {str(e)}")
+                return None
+            
+        st.success("Successfully loaded vector store!")
         return vector_store
         
     except Exception as e:
         st.error(f"Error loading vector store: {str(e)}")
+        import traceback
+        st.error(f"Full error: {traceback.format_exc()}")
+        st.error("""
+        There might be an issue with the vector store cache. Try regenerating it:
+        1. Delete the data/vector_store_cache folder
+        2. Run: python utils/generate_embeddings.py
+        """)
         return None
 
 def get_conversation_chain(vector_store, mistral_api_key):
